@@ -1,11 +1,9 @@
 Feature: Testing Vhosts
 	This feature is to be used to create and manage vhosts
 
-	Scenario: Provision the server
-		Given that I want to build a server of type "test"
-		Then I should be able to connect to the provisioning server
-		And I should recieve an XML file
-		And I should create the virtual machine
+	Background: Provision the server
+        Given that I have the config file "test.yaml"
+        Then I create the vm "test"
 
 	Scenario: Check the server has been built
 		Given that I want to confirm the server "test" has been provisioned
