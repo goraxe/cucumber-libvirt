@@ -3,8 +3,8 @@
 # define the type of server that we want to build
 Given /^that I have vm config file "([^"]*)"$/ do |config|
   # set a global to be used in the rest of the process
-
   @vm_config = YAML::load(File.open(config)) 
+  @domains =  {} 
 
   # build up a picture of how the network should look
   # use some global vars to keep track
@@ -115,15 +115,17 @@ def create_vm(config)
 eos
 
   # make sure its undefined
-  domain = @vmconn.lookup_domain_by_name(config['name'])
-  domain.undefine
-  # Now define the VM
-  @vmconn.define_domain_xml(@sys_xmloutput)
-  # query libvirt for the domain we just created
-  domain = @vmconn.lookup_domain_by_name(config['name'])
-  # and create and start the VM
-  domain.create()
-
+  #begin 
+      #domain = @vmconn.lookup_domain_by_name(config['name'])
+      #domain.undefine
+  #ensure
+      # Now define the VM
+  @domains[config['name']] = @vmconn.create_domain_linux(@sys_xmloutput)
+      # query libvirt for the domain we just created
+    #  domain = @vmconn.lookup_domain_by_name(config['name'])
+      # and create and start the VM
+     # domain.create()
+  #end
 end
 
 
@@ -136,23 +138,14 @@ Given /^that I want to confirm the server "([^"]*)" has been provisioned$/ do |s
 end
 
 # find out what we should be checking for
-Then /^I should check the status of the server$/ do
+Then /^I should check the status of "([^"]*)" is "([^"]*)"$/ do |vm, requestedStatus|
   # retrieve the serverType info from cobbler
-  @xml_description = @cblr_api.call("get_system_for_koan",@serverType)
-  # get the hostname
-  serverName = @xml_description['hostname']
+  serverName = @vm_config[vm]
   # Connect to libvirt and create a domain object based upon the "ci-build" hostname
-  @ciDomain = @vmconn.lookup_domain_by_name(serverName.to_s  + "-ci-build")
-end
+  @ciDomain = @vmconn.lookup_domain_by_name(vm)
 
-# So we know the VM exists - is it running or stopped?
-Then /^the server should have a status of "([^"]*)"$/ do |requestedStatus|
-  # get the current status of the domain
   curState = @ciDomain.info.state
-  
-  # Unfortunately the status is only ever returned as an int - any one who wants to find a prettier way of achieving the following is more than welcome to try!
 
-  # The requested status is passed as a str, we need to convert it into an int so we can compare it with the current value returned
   case requestedStatus
 	when "running" then reqState = 1
 	when "stopped" then reqState = 5
@@ -167,6 +160,15 @@ Then /^the server should have a status of "([^"]*)"$/ do |requestedStatus|
 
   # check to see if the int values match - if they don't, error and print the string values... Simples!
   raise ArgumentError, "The VM was requested to be #{requestedStatus} however it was found to be #{actualStatus}" unless reqState == curState
+end
+
+# So we know the VM exists - is it running or stopped?
+Then /^the server should have a status of "([^"]*)"$/ do |requestedStatus|
+  # get the current status of the domain
+  
+  # Unfortunately the status is only ever returned as an int - any one who wants to find a prettier way of achieving the following is more than welcome to try!
+
+  # The requested status is passed as a str, we need to convert it into an int so we can compare it with the current value returned
   
 end
 
