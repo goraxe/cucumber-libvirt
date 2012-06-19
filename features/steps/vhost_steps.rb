@@ -1,42 +1,92 @@
 # This file licensed under the GPL v 2.0 and above where appropriate
 
 # define the type of server that we want to build
-Given /^that I want to build a server of type "([^"]*)"$/ do |serverType|
-  # echo the type of server to be built for debugging purposes
-  puts "Building Continuous Integration Environment for #{serverType}"
+Given /^that I have vm config file "([^"]*)"$/ do |config|
   # set a global to be used in the rest of the process
-  @serverType = serverType
+
+  @vm_config = YAML::load(File.open(config)) 
+
+  # build up a picture of how the network should look
+  # use some global vars to keep track
+  @net = nil
+  @ips = {}
+  @vm_config.each |vm, config| do
+      # FIXME: only support ipv4 currently
+      # FIXME: assume class C, cidr/24
+      ip = config['ip']
+      ip =~ /(\d+.\d+\.\d+)\.(\d+)/
+      net = "#{$1}.1"
+      host_ip = $2
+      if host_ip.to_i == 1 then
+          raise "#{ip} is reserved for the host"
+      elsif not @ips[ip].nil? then
+          raise "#{ip} has already been assigned"
+      else
+          @ips[ip] =vm
+      end
+      if @net.nil? then
+          @net = net
+      elsif @net != net then
+          raise "all machines must be on the same network!"
+      end
+      config['mac'] = generate_mac(host_ip)
+  end
+#define the network xml
+  hosts = @vm_config.map |vm, config| do
+      return "<host mac='#{config['mac']}' name='#{config['name']}' ip='#{config['ip']}' />"
+  end.join"\n"
+  network_xml <<eos
+<network>
+  <name>cucumber-libvirt</name>
+  <bridge name='vircuke1' />
+  <forward mode='nat' />
+  <ip address="#{@net}" netmask="255.255.255.0">
+    <dhcp>
+    #{hosts}
+    </dhcp>
+  </ip>
+</network>
+eos
+
+net = @vmconn.define_network_xml(network_xml)
+
+@net.create
 end
 
-
-# connect to cobbler and request the details for the host
-Then /^I should be able to connect to the provisioning server$/ do
-  # connect to cobbler and check the type exists, if it does, setup a list with all the details to be converted to xml
-  @xml_description = @cblr_api.call("get_system_for_koan",@serverType)
+def generate_mac(ip)
+    mac = '52:54:00:ff:ff' + ( 255 - ip).to_s(16)
+    return mac
 end
-
 
 # create the XML file to be used by LibVirt to import and create/edit/delete the VM
-Then /^I should recieve an XML file$/ do
+Then /^I create the vm "([^"]*)"$/ do |vm|
+    create_vm(@vm_config[vm])
   # set some variables to be used in the file
-  virt_mem = @xml_description['virt_ram'].to_i  # the memory that is allocated in cobbler (KB)
-  virt_ram = virt_mem.to_i * 1024 # the memory to be used (MB)
-  mac = @xml_description['interfaces']['eth0']['mac_address']  # The mac address to be assigned - Cobbler won't build without this!
-  virt_bridge = @xml_description['interfaces']['eth0']['virt_bridge']  # The bridge interface on the physical host to used as defined in cobbler - loads of stuff breaks if this isn't set properly!
+#  virt_mem = @xml_description['virt_ram'].to_i  # the memory that is allocated in cobbler (KB)
+#  virt_ram = virt_mem.to_i * 1024 # the memory to be used (MB)
+#  mac = @xml_description['interfaces']['eth0']['mac_address']  # The mac address to be assigned - Cobbler won't build without this!
+#  virt_bridge = @xml_description['interfaces']['eth0']['virt_bridge']  # The bridge interface on the physical host to used as defined in cobbler - loads of stuff breaks if this isn't set properly!
 
+end
 
+def create_vm(config)
   # Generate the XML output as defined by LibVirt at http://www.libvirt.org/format.html
 
+#    <interface type='bridge'>
+#      <mac address='#{config['mac']}'/>
+#      <source bridge='#{virt_bridge}'/>
+#      <model type='virtio' />
+#    </interface>
   # The system definition
   @sys_xmloutput = <<-eos
 <domain type='kvm'>
-  <name>#{@xml_description['hostname']}-ci-build</name>
+  <name>#{config['name']}</name>
   <uuid></uuid>
-  <memory>#{virt_ram}</memory>
-  <currentMemory>#{virt_ram}</currentMemory>
-  <vcpu>#{@xml_description['virt_cpus']}</vcpu>
+  <memory>#{config['ram']}</memory>
+  <currentMemory>#{config['ram']}</currentMemory>
+  <vcpu>#{config['cpus']}</vcpu>
   <os>
-    <type arch='#{@xml_description['arch']}' machine='pc'>hvm</type>
+    <type arch='#{config['arch']}' machine='pc'>hvm</type>
     <boot dev='hd' />
     <boot dev='network' />
   </os>
@@ -52,20 +102,9 @@ Then /^I should recieve an XML file$/ do
   <devices>
     <emulator>/usr/bin/kvm</emulator>
     <disk type='file' device='disk'>
-      <source file='#{@xml_description['virt_path'] + "/" + @xml_description['hostname']}-ci-build.img'/>
+      <source file='#{config['disk']}'/>
       <target dev='hda' bus='ide'/>
     </disk>
-    <interface type='bridge'>
-      <mac address='#{mac}'/>
-      <source bridge='#{virt_bridge}'/>
-      <model type='virtio' />
-    </interface>
-    <console type='pty'>
-      <target port='0'/>
-    </console>
-    <console type='pty'>
-      <target port='0'/>
-    </console>
     <input type='mouse' bus='ps2'/>
     <graphics type='vnc' port='-1' autoport='yes' keymap='en-gb'/>
     <video>
@@ -75,36 +114,18 @@ Then /^I should recieve an XML file$/ do
 </domain>
 eos
 
-
-# The storage volume definition
-@disk_xmloutput =<<-eos
-      <volume>
-        <name>#{@xml_description['hostname']}-ci-build.img</name>
-        <allocation>0</allocation>
-        <capacity unit="G">8</capacity>
-        <target>
-          <path>#{@xml_description['virt_path'] + "/" + @xml_description['hostname']}-ci-build.img</path>
-        </target>
-      </volume>
-eos
-end
-
-
-# By this point, the script should have generated all the XML required to build th machine, so let's get on with it! :)
-Then /^I should create the virtual machine$/ do
-
-  # Create the storage first - if we don't, we can't create the VM
-  @vm_stor.create_vol_xml(@disk_xmloutput)
-  
-
-  # This all gets a bit weird here, we need to define the domain, then query libvirt for the domain we just created, then start it otherwise it all falls over...
+  # make sure its undefined
+  domain = @vmconn.lookup_domain_by_name(config['name'])
+  domain.undefine
   # Now define the VM
   @vmconn.define_domain_xml(@sys_xmloutput)
   # query libvirt for the domain we just created
-  domain = @vmconn.lookup_domain_by_name(@xml_description['hostname']+"-ci-build")
+  domain = @vmconn.lookup_domain_by_name(config['name'])
   # and create and start the VM
   domain.create()
+
 end
+
 
 # sometimes we just need to know that the VM has been created...
 
