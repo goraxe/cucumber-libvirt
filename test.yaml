@@ -1,0 +1,6 @@
+test:
+    name: test
+    ram:  256M
+    cpus: 1
+    arch: x86_64
+    disk: /home/goraxe/vms/precise/box.qcow2
