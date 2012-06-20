@@ -10,7 +10,12 @@ Given /^that I have vm config file "([^"]*)"$/ do |config|
   # use some global vars to keep track
   @net = nil
   @ips = {}
-  @vm_config.each |vm, config| do
+  @vm_config.each do |vm,config| 
+      ['name','ram', 'cpus', 'arch', 'disk'].each do |field|
+          if config['name'].nil? then
+              raise "#{field} must be supplied in vm config"
+          end
+      end
       # FIXME: only support ipv4 currently
       # FIXME: assume class C, cidr/24
       ip = config['ip']
@@ -32,13 +37,12 @@ Given /^that I have vm config file "([^"]*)"$/ do |config|
       config['mac'] = generate_mac(host_ip)
   end
 #define the network xml
-  hosts = @vm_config.map |vm, config| do
-      return "<host mac='#{config['mac']}' name='#{config['name']}' ip='#{config['ip']}' />"
+  hosts = @vm_config.map do |vm, config|
+      "<host mac='#{config['mac']}' name='#{config['name']}' ip='#{config['ip']}' />"
   end.join"\n"
-  network_xml <<eos
+  network_xml = <<eos
 <network>
   <name>cucumber-libvirt</name>
-  <bridge name='vircuke1' />
   <forward mode='nat' />
   <ip address="#{@net}" netmask="255.255.255.0">
     <dhcp>
@@ -47,48 +51,49 @@ Given /^that I have vm config file "([^"]*)"$/ do |config|
   </ip>
 </network>
 eos
+    begin
+        net =  @vmconn.lookup_network_by_name('cucumber-libvirt')
+        if not net.nil? then
+            net.destroy
+            net.undefine
+        end
+    rescue
+    end
+    begin
+        net = @vmconn.define_network_xml(network_xml)
 
-net = @vmconn.define_network_xml(network_xml)
-
-@net.create
+        net.create
+    rescue Libvirt::DefinitionError => e
+        puts "failed to define network: " +  e.libvirt_message
+        raise
+    end
 end
 
 def generate_mac(ip)
-    mac = '52:54:00:ff:ff' + ( 255 - ip).to_s(16)
+    normalised_ip = 255 - ip.to_i
+    mac = '52:54:00:ff:ff:' + normalised_ip.to_s(16)
     return mac
 end
 
 # create the XML file to be used by LibVirt to import and create/edit/delete the VM
 Then /^I create the vm "([^"]*)"$/ do |vm|
     create_vm(@vm_config[vm])
-  # set some variables to be used in the file
-#  virt_mem = @xml_description['virt_ram'].to_i  # the memory that is allocated in cobbler (KB)
-#  virt_ram = virt_mem.to_i * 1024 # the memory to be used (MB)
-#  mac = @xml_description['interfaces']['eth0']['mac_address']  # The mac address to be assigned - Cobbler won't build without this!
-#  virt_bridge = @xml_description['interfaces']['eth0']['virt_bridge']  # The bridge interface on the physical host to used as defined in cobbler - loads of stuff breaks if this isn't set properly!
-
 end
 
 def create_vm(config)
   # Generate the XML output as defined by LibVirt at http://www.libvirt.org/format.html
 
-#    <interface type='bridge'>
-#      <mac address='#{config['mac']}'/>
-#      <source bridge='#{virt_bridge}'/>
-#      <model type='virtio' />
-#    </interface>
   # The system definition
   @sys_xmloutput = <<-eos
 <domain type='kvm'>
   <name>#{config['name']}</name>
   <uuid></uuid>
-  <memory>#{config['ram']}</memory>
-  <currentMemory>#{config['ram']}</currentMemory>
+  <memory>#{config['ram'] * 1024}</memory>
+  <currentMemory>#{config['ram'] *1024}</currentMemory>
   <vcpu>#{config['cpus']}</vcpu>
   <os>
     <type arch='#{config['arch']}' machine='pc'>hvm</type>
     <boot dev='hd' />
-    <boot dev='network' />
   </os>
   <features>
     <acpi/>
@@ -101,9 +106,14 @@ def create_vm(config)
   <on_crash>restart</on_crash>
   <devices>
     <emulator>/usr/bin/kvm</emulator>
-    <disk type='file' device='disk'>
-      <source file='#{config['disk']}'/>
-      <target dev='hda' bus='ide'/>
+    <interface type='network'>
+        <mac address='#{config['mac']}' />
+        <source network='cucumber-libvirt' />
+    </interface>
+    <disk type='file' device='disk' >
+      <driver name='qemu' type='qcow2' />
+      <source file='#{config['disk']}' />
+      <target dev='hda' bus='virtio'/>
     </disk>
     <input type='mouse' bus='ps2'/>
     <graphics type='vnc' port='-1' autoport='yes' keymap='en-gb'/>
@@ -115,16 +125,33 @@ def create_vm(config)
 eos
 
   # make sure its undefined
-  #begin 
-      #domain = @vmconn.lookup_domain_by_name(config['name'])
-      #domain.undefine
+  begin 
+      domain = @vmconn.lookup_domain_by_name(config['name'])
+      domain.destroy
+  rescue Libvirt::Error => e
+      puts e.to_s + e.libvirt_message
+  ensure
+      if not domain.nil? then
+          domain.undefine
+      end
+  end
   #ensure
       # Now define the VM
-  @domains[config['name']] = @vmconn.create_domain_linux(@sys_xmloutput)
-      # query libvirt for the domain we just created
-    #  domain = @vmconn.lookup_domain_by_name(config['name'])
+  # @domains[config['name']] = @vmconn.create_domain_linux(@sys_xmloutput)
       # and create and start the VM
-     # domain.create()
+  begin
+      @vmconn.define_domain_xml(@sys_xmloutput)
+  rescue Libvirt::DefinitionError => e
+      puts "failed to define vm: " + e.libvirt_message
+      raise
+  end
+      # query libvirt for the domain we just created
+  begin
+      @domains[config['name']] = @vmconn.lookup_domain_by_name(config['name'])
+      @domains[config['name']].create()
+  rescue Libvirt::Error => e
+      puts e.to_s  + ": " + e.libvirt_message
+  end
   #end
 end
 
@@ -162,23 +189,13 @@ Then /^I should check the status of "([^"]*)" is "([^"]*)"$/ do |vm, requestedSt
   raise ArgumentError, "The VM was requested to be #{requestedStatus} however it was found to be #{actualStatus}" unless reqState == curState
 end
 
-# So we know the VM exists - is it running or stopped?
-Then /^the server should have a status of "([^"]*)"$/ do |requestedStatus|
-  # get the current status of the domain
-  
-  # Unfortunately the status is only ever returned as an int - any one who wants to find a prettier way of achieving the following is more than welcome to try!
-
-  # The requested status is passed as a str, we need to convert it into an int so we can compare it with the current value returned
-  
-end
-
 
 # I really need to get around to writing these tests!
-Then /^I should ping the server$/ do
+Then /^I should ping the server "([^"]*)"$/ do |vm|
 	# Set a counter so this script can bail if the build takes too long/fails to ping
 	counter = 0
 	# ping the value of the IP Address retrieved from the xml_description
-	while Ping.pingecho(@xml_description['interfaces']['eth0']['ip_address'])  == false do
+	while Ping.pingecho(@vm_config[vm]['ip'])  == false do
 		sleep(10)
 		counter = counter +1
 		puts "Counter currently at: #{counter}"
@@ -187,10 +204,10 @@ Then /^I should ping the server$/ do
 	puts "I can ping the host! :)"
 end
 
-Then /^I should be able to connect the server on port "([^"]*)"$/ do |port|
+Then /^I should be able to connect to "([^"]*)" on port "([^"]*)"$/ do |vm, port|
 	# Make sure the port checker doesn't time out
 	ccounter = 0
-	while is_port_open(@xml_description['interfaces']['eth0']['ip_address'],port) == false do
+	while is_port_open(@vm_config[vm]["ip"],port) == false do
 		sleep(10)
 		ccounter = ccounter + 1
 		puts "Connection Counter currently at #{ccounter}"
@@ -201,9 +218,8 @@ end
 # All the tests that we wanted to run are now complete, let's throw away the server so we know that we are always starting from a clean system next time.
 
 # Which server do we want to destroy?
-Given /^that I want to destroy the server "([^\"]*)"$/ do |serverType|
-	# set the server type as before
-	@serverType = serverType
+Given /^that I want to destroy the server "([^\"]*)"$/ do |name|
+   @ciDomain = @vmconn.lookup_domain_by_name(name)
 end
 
 

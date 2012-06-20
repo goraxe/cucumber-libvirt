@@ -1,6 +1,7 @@
 test:
     name: test
-    ram:  256M
+    ram:  256
     cpus: 1
     arch: x86_64
-    disk: /home/goraxe/vms/precise/box.qcow2
+    disk: /var/lib/libvirt/images/precise.qcow2
+    ip:   10.0.2.2
